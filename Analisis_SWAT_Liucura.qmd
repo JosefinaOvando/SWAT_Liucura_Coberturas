@@ -901,7 +901,7 @@ if (nrow(nitratos_obs) > 0) {
       title = "Nitratos observados en el río Pucón",
       subtitle = "Estación Balseadero Quelhue (DGA)",
       x = "Año",
-      y = "Valor reportado (unidad por confirmar)",
+      y = "Valor reportado",
       caption = paste(
         "Referencia regional.",
         "No corresponde a la salida del Liucura.",
@@ -1044,6 +1044,69 @@ Este archivo no representa las cargas medidas en el canal de salida, pero permit
 ### Figura 6. Producción anual de sedimentos
 
 Se analiza la producción anual de sedimentos generados por erosión hídrica en las superficies terrestres de la cuenca, utilizando la variable `sedyld` de SWAT+. A diferencia de los sedimentos transportados por el canal de salida, esta variable representa el aporte generado desde las unidades terrestres del modelo. La comparación interanual permite examinar cómo responde este proceso a las distintas representaciones de cobertura del suelo.
+
+```{r}
+
+# ==========================================
+# 8. CARGA DE DATOS DE EROSIÓN HÍDRICA
+# ==========================================
+
+# Función para cargar basin_ls_mon.csv
+leer_paisaje <- function(escenario) {
+
+  ruta <- file.path(
+    carpeta_swat,
+    carpetas[[escenario]],
+    "basin_ls_mon.csv"
+  )
+
+  if (!file.exists(ruta)) {
+    stop("No se encontró el archivo: ", ruta)
+  }
+
+  datos <- leer_swat(ruta)
+
+  # Verificar variables necesarias
+  necesarias <- c("yr", "mon", "sedyld")
+  faltantes <- setdiff(necesarias, names(datos))
+
+  if (length(faltantes) > 0) {
+    stop(
+      "Faltan columnas en ", escenario, ": ",
+      paste(faltantes, collapse = ", ")
+    )
+  }
+
+  datos %>%
+    dplyr::transmute(
+      escenario = escenario,
+      fecha = lubridate::make_date(
+        as.integer(yr),
+        as.integer(mon),
+        1
+      ),
+      sedyld_t_ha = as.numeric(sedyld)
+    )
+}
+
+# Crear el objeto paisaje con las tres simulaciones
+paisaje <- dplyr::bind_rows(
+  lapply(escenarios, leer_paisaje)
+)
+
+# Verificar que cargó correctamente
+print(
+  paisaje %>%
+    dplyr::group_by(escenario) %>%
+    dplyr::summarise(
+      meses = dplyr::n(),
+      inicio = min(fecha),
+      fin = max(fecha),
+      .groups = "drop"
+    )
+)
+
+```
 
 ```{r}
 
