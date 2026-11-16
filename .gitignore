@@ -1,0 +1,21 @@
+
+# Archivos temporales de RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Archivos temporales de Quarto
+.quarto/
+*_cache/
+*_files/
+
+# Archivos auxiliares de PDF
+*.aux
+*.log
+*.synctex.gz
+
+# Biblioteca local de renv
+renv/library/
+renv/staging/
+

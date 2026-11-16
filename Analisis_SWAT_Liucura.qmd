@@ -1,0 +1,1240 @@
+---
+title: "Influencia de tres coberturas del suelo en la respuesta ecohidrológica del río Liucura"
+subtitle: "Análisis exploratorio de SWAT+ y contraste con observaciones"
+author: "Josefina Ovando"
+date: "2026-11-16"
+lang: es
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    embed-resources: true
+    fig-width: 11
+    fig-height: 5
+  
+  pdf:
+    documentclass: scrartcl
+    papersize: a4
+    toc: true
+    number-sections: true
+    geometry:
+      - margin=2.5cm
+    fontsize: 11pt
+    fig-width: 7
+    fig-height: 4.5
+    
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+## 1. Introducción
+
+La representación de la cobertura del suelo constituye un insumo relevante para la modelación hidrológica, dado que influye sobre procesos como la escorrentía, la evapotranspiración, la erosión y el transporte de nutrientes.
+
+En este trabajo se analiza la sensibilidad de SWAT+ a tres productos de cobertura del suelo: CONAF, MapBiomas 2024 y CLDynamic 2018, aplicados a la cuenca del río Liucura.
+
+**Pregunta:** ¿Cómo cambia la respuesta hidrológica y la exportación de sedimentos y nitratos según el producto de cobertura del suelo empleado?
+
+Se comparan tres variables en el canal de salida:
+
+-   Caudal medio mensual (m³/s).
+-   Carga mensual de sedimentos (t/mes).
+-   Carga mensual de nitratos (kg N/mes).
+
+La evaluación de desempeño se realiza utilizando caudales observados de CAMELS-CL para la estación Río Liucura en Liucura (9416001), previa verificación de la correspondencia espacial.
+
+Las observaciones sedimentométricas del río Trancura y las mediciones de nitratos del río Pucón se utilizan exclusivamente como referencias regionales, debido a que representan otras áreas aportantes.
+
+## 2. Preparación del análisis
+
+```{r}
+#| label: setup
+#| include: false
+
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lubridate)
+library(readr)
+library(knitr)
+
+options(scipen = 999)
+
+
+# Colores consistentes para las tres coberturas
+colores <- c(
+  CONAF = "#0072B2",
+  MapBiomas = "#D55E00",
+  CLDynamic = "#CC79A7"
+)
+
+# Tipos de línea para complementar los colores
+tipos_linea <- c(
+  CONAF = "solid",
+  MapBiomas = "dashed",
+  CLDynamic = "dotdash"
+)
+
+# Meses en español
+meses_esp <- c(
+  "Ene", "Feb", "Mar", "Abr",
+  "May", "Jun", "Jul", "Ago",
+  "Sep", "Oct", "Nov", "Dic"
+)
+
+# Estilo común a todas las figuras
+tema <- ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    legend.position = "bottom",
+    plot.title = element_text(
+      face = "bold",
+      size = 13
+    ),
+    plot.subtitle = element_text(
+      color = "gray35",
+      size = 10
+    ),
+    strip.text = element_text(
+      face = "bold",
+      size = 10
+    ),
+    strip.background = element_rect(
+      fill = "gray95",
+      color = NA
+    ),
+    axis.title = element_text(size = 10)
+  )
+
+
+leer_csv_seguro <- function(ruta) {
+  if (!file.exists(ruta)) return(tibble::tibble())
+  readr::read_csv(ruta, show_col_types = FALSE)
+}
+
+
+
+
+leer_swat <- function(ruta) {
+
+  # Leer encabezado de SWAT+
+  lineas <- readLines(
+    ruta,
+    n = 3,
+    warn = FALSE
+  )
+
+  nombres <- trimws(
+    strsplit(lineas[2], ",", fixed = TRUE)[[1]]
+  )
+
+  # Leer los datos
+  datos <- data.table::fread(
+    ruta,
+    skip = 3,
+    header = FALSE,
+    sep = ",",
+    showProgress = FALSE
+  )
+
+  # Corrección específica de SWAT+
+  # basin_ls contiene 3 columnas adicionales
+  # en el encabezado que no tienen datos
+
+  if (
+    grepl("^basin_ls_", basename(ruta)) &&
+    length(nombres) == ncol(datos) + 3 &&
+    identical(
+      tail(nombres, 3),
+      c("plant_cov", "mgt_ops", "percn")
+    )
+  ) {
+
+    nombres <- head(nombres, -3)
+
+  }
+
+  # Comprobar correspondencia
+  if (length(nombres) != ncol(datos)) {
+    stop(
+      "El archivo ", basename(ruta),
+      " tiene ", length(nombres),
+      " nombres y ", ncol(datos),
+      " columnas de datos. Revisar encabezado."
+    )
+  }
+
+  data.table::setnames(
+    datos,
+    make.unique(nombres)
+  )
+
+  tibble::as_tibble(datos)
+}
+
+```
+
+### 2.1. Rutas de las simulaciones
+
+Cada producto debe contar con una carpeta independiente.
+
+```{r}
+escenarios <- c(
+  "CONAF",
+  "MapBiomas",
+  "CLDynamic"
+)
+
+carpetas <- c(
+  CONAF = "CONAF",
+  CLDynamic = "CLDynamic",
+  MapBiomas = "MapBiomas" )
+
+carpeta_swat <- "datos/swat"
+
+
+id_canal <- c(
+  CONAF = 1L,
+  MapBiomas = 1L,
+  CLDynamic = 1L
+)
+
+inventario <- tibble(
+  escenario = escenarios,
+  archivo = file.path(
+    carpeta_swat,
+    escenarios,
+    "channel_sd_mon.csv"
+  ),
+  disponible = file.exists(archivo)
+)
+
+knitr::kable(inventario)
+```
+
+No se presupone que el canal con el ID mayor corresponda a la salida de la cuenca. La selección debe verificarse espacialmente y mediante el área de drenaje.
+
+## 3. Cargar los resultados de SWAT+
+
+El archivo `channel_sd_mon.csv` contiene los resultados por canal, en intervalos mensuales.
+
+Se extraen `flo_out`, `sed_out` y `no3_out`.
+
+```{r}
+leer_outlet <- function(escenario) {
+
+  ruta <- file.path(
+    carpeta_swat,
+    escenario,
+    "channel_sd_mon.csv"
+  )
+
+  id <- id_canal[[escenario]]
+
+  if (!file.exists(ruta) || is.na(id)) {
+    return(NULL)
+  }
+
+  datos <- leer_swat(ruta)
+
+  necesarias <- c(
+    "unit", "yr", "mon",
+    "flo_out", "sed_out", "no3_out"
+  )
+
+  faltantes <- setdiff(
+    necesarias,
+    names(datos)
+  )
+
+  if (length(faltantes) > 0) {
+    stop(
+      "Faltan columnas en ", ruta, ": ",
+      paste(faltantes, collapse = ", ")
+    )
+  }
+
+  resultado <- datos %>%
+    filter(as.integer(unit) == id) %>%
+    transmute(
+      escenario = escenario,
+      canal = id,
+      fecha = make_date(
+        as.integer(yr),
+        as.integer(mon),
+        1
+      ),
+      caudal_m3s = as.numeric(flo_out),
+      sedimentos_t_mes = as.numeric(sed_out),
+      nitratos_kgN_mes = as.numeric(no3_out)
+    )
+
+  if (nrow(resultado) == 0) {
+    stop("Canal no encontrado: ", id)
+  }
+
+  if (anyDuplicated(resultado$fecha)) {
+    stop("Meses duplicados en: ", escenario)
+  }
+
+  resultado
+}
+
+outlet <- bind_rows(
+  lapply(escenarios, leer_outlet)
+)
+
+if (nrow(outlet) > 0) {
+
+  resumen <- outlet %>%
+    group_by(escenario) %>%
+    summarise(
+      meses = n(),
+      desde = min(fecha),
+      hasta = max(fecha),
+      .groups = "drop"
+    )
+
+  knitr::kable(resumen)
+
+} else {
+  cat(
+    "Faltan archivos channel_sd_mon.csv ",
+    "o identificadores del canal de salida."
+  )
+}
+```
+
+## 4. Comparación de las tres coberturas
+
+### Figura 1. Comparación interanual de las simulaciones
+
+La figura presenta la variación interanual del caudal medio y de las cargas de sedimentos y nitratos simuladas mediante SWAT+ para las tres coberturas del suelo. La agregación anual permite reducir la variabilidad mensual y facilitar la identificación de diferencias entre escenarios.
+
+```{r}
+
+#| fig-width: 9
+#| fig-height: 8
+#| fig-cap: "Comparación anual de los tres productos de cobertura del suelo."
+
+anual <- tibble::tibble()
+
+if (nrow(outlet) > 0) {
+
+  anual <- outlet %>%
+    mutate(
+      anio = lubridate::year(fecha),
+      mes = lubridate::month(fecha),
+      dias = lubridate::days_in_month(fecha)
+    ) %>%
+    group_by(escenario, anio) %>%
+    filter(
+      n() == 12,
+      n_distinct(mes) == 12,
+      all(is.finite(caudal_m3s)),
+      all(is.finite(sedimentos_t_mes)),
+      all(is.finite(nitratos_kgN_mes))
+    ) %>%
+    summarise(
+      caudal = weighted.mean(caudal_m3s, dias),
+      sedimentos = sum(sedimentos_t_mes),
+      nitratos = sum(nitratos_kgN_mes),
+      .groups = "drop"
+    )
+
+  anual_largo <- anual %>%
+    pivot_longer(
+      cols = c(caudal, sedimentos, nitratos),
+      names_to = "variable",
+      values_to = "valor"
+    ) %>%
+    mutate(
+      variable = factor(
+        variable,
+        levels = c(
+          "caudal", "sedimentos", "nitratos"
+        ),
+        labels = c(
+          "Caudal medio anual (m³/s)",
+          "Sedimentos transportados (t/año)",
+          "Nitratos transportados (kg N/año)"
+        )
+      )
+    )
+
+  print(
+    ggplot(
+      anual_largo,
+      aes(
+        x = anio,
+        y = valor,
+        color = escenario,
+        linetype = escenario
+      )
+    ) +
+      geom_line(linewidth = 0.85) +
+      facet_wrap(
+        ~ variable,
+        ncol = 1,
+        scales = "free_y"
+      ) +
+      scale_color_manual(values = colores) +
+      scale_linetype_manual(values = tipos_linea) +
+      labs(
+        title = "Respuesta ecohidrológica simulada",
+        subtitle = paste(
+          "Comparación anual de CONAF,",
+          "MapBiomas y CLDynamic"
+        ),
+        x = "Año",
+        y = NULL,
+        color = "Cobertura",
+        linetype = "Cobertura"
+      ) +
+      tema
+  )
+}
+
+```
+
+### Figura 2. Estacionalidad de las tres variables
+
+Se analiza la variabilidad estacional del caudal, los sedimentos y los nitratos mediante la mediana mensual y los percentiles 25 y 75. Esta representación permite identificar los períodos del año en que se concentran los mayores y menores valores simulados, así como comparar la magnitud y variabilidad de las respuestas entre coberturas.
+
+```{r}
+
+#| fig-width: 10
+#| fig-height: 4.5
+#| fig-cap: "Ciclos estacionales de caudal, sedimentos y nitratos para cada cobertura del suelo."
+
+if (nrow(outlet) > 0) {
+
+  estacionalidad <- outlet %>%
+    mutate(
+      mes = lubridate::month(fecha)
+    ) %>%
+    pivot_longer(
+      cols = c(
+        caudal_m3s,
+        sedimentos_t_mes,
+        nitratos_kgN_mes
+      ),
+      names_to = "variable",
+      values_to = "valor"
+    ) %>%
+    group_by(escenario, variable, mes) %>%
+    summarise(
+      mediana = median(valor, na.rm = TRUE),
+      p25 = quantile(valor, 0.25, na.rm = TRUE),
+      p75 = quantile(valor, 0.75, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  nombres_variables <- c(
+    caudal_m3s = "Caudal medio mensual (m³/s)",
+    sedimentos_t_mes = "Sedimentos (t/mes)",
+    nitratos_kgN_mes = "Nitratos (kg N/mes)"
+  )
+
+  for (variable_actual in names(nombres_variables)) {
+
+    datos_grafico <- estacionalidad %>%
+      filter(variable == variable_actual)
+
+    p <- ggplot(
+      datos_grafico,
+      aes(x = mes, y = mediana)
+    ) +
+      geom_ribbon(
+        aes(
+          ymin = p25,
+          ymax = p75,
+          fill = escenario
+        ),
+        alpha = 0.23,
+        color = NA
+      ) +
+      geom_line(
+        aes(color = escenario),
+        linewidth = 0.9
+      ) +
+      geom_point(
+        aes(color = escenario),
+        size = 1.8
+      ) +
+      facet_wrap(
+        ~ escenario,
+        ncol = 3
+      ) +
+      scale_color_manual(values = colores) +
+      scale_fill_manual(values = colores) +
+      scale_x_continuous(
+        breaks = 1:12,
+        labels = meses_esp
+      ) +
+      guides(
+        color = "none",
+        fill = "none"
+      ) +
+      labs(
+        title = paste(
+          "Estacionalidad:",
+          nombres_variables[[variable_actual]]
+        ),
+        subtitle = paste(
+          "Puntos: mediana mensual |",
+          "Banda: percentiles 25–75"
+        ),
+        x = "Mes",
+        y = nombres_variables[[variable_actual]]
+      ) +
+      tema +
+      theme(
+        axis.text.x = element_text(
+          angle = 45,
+          hjust = 1
+        )
+      )
+
+    print(p)
+  }
+}
+
+```
+
+## 5. Evaluación con caudales observados
+
+Se utilizan caudales medios mensuales de CAMELS-CL, estación Río Liucura en Liucura, código 9416001.
+
+El archivo `caudal_dga.csv` fue preparado a partir de las observaciones diarias, excluyendo los meses sin cobertura suficiente.
+
+La comparación requiere que el canal de salida de SWAT+ corresponda espacialmente a la estación.
+
+```{r}
+ruta_obs <- "datos/observados/caudal_dga.csv"
+
+caudal_obs <- leer_csv_seguro(ruta_obs)
+
+if (nrow(caudal_obs) > 0) {
+
+  caudal_obs <- caudal_obs %>%
+    transmute(
+      fecha = as.Date(fecha),
+      Q_obs_m3s = as.numeric(Q_obs_m3s)
+    ) %>%
+    filter(
+      !is.na(fecha),
+      is.finite(Q_obs_m3s),
+      Q_obs_m3s >= 0
+    )
+
+  if (anyDuplicated(caudal_obs$fecha)) {
+    stop("Hay meses observados duplicados.")
+  }
+
+  cat(
+    "Meses con caudal observado válido:",
+    nrow(caudal_obs)
+  )
+}
+
+comparacion <- tibble::tibble()
+
+if (
+  nrow(caudal_obs) > 0 &&
+  nrow(outlet) > 0
+) {
+
+  comparacion <- outlet %>%
+    inner_join(
+      caudal_obs,
+      by = "fecha"
+    ) %>%
+    filter(
+      is.finite(caudal_m3s),
+      is.finite(Q_obs_m3s)
+    )
+
+  # Mismos meses para todos los escenarios disponibles
+  n_escenarios <- n_distinct(outlet$escenario)
+
+  comparacion <- comparacion %>%
+    group_by(fecha) %>%
+    filter(
+      n_distinct(escenario) == n_escenarios
+    ) %>%
+    ungroup()
+}
+```
+
+### Figura 3. Caudal observado versus simulado
+
+Se comparan los caudales medios mensuales simulados por cada cobertura con los registros observados de la estación Río Liucura en Liucura, obtenidos de CAMELS-CL. Para facilitar la visualización, se seleccionó una ventana temporal de cuatro años (2010–2013), manteniendo una escala común entre los tres paneles. Esto permite examinar la capacidad de cada simulación para representar la variación temporal y la magnitud de los caudales observados.
+
+```{r}
+
+#| fig-width: 10
+#| fig-height: 8
+#| fig-cap: "Caudal medio mensual observado y simulado para cada cobertura del suelo."
+
+# Ventana temporal que queremos visualizar
+anio_inicio_zoom <- 2010
+anio_fin_zoom <- 2013
+
+if (nrow(comparacion) > 0) {
+
+  datos_zoom <- comparacion %>%
+    filter(
+      lubridate::year(fecha) >= anio_inicio_zoom,
+      lubridate::year(fecha) <= anio_fin_zoom
+    )
+
+  if (nrow(datos_zoom) > 0) {
+
+    ggplot(
+      datos_zoom,
+      aes(x = fecha)
+    ) +
+      # Caudal simulado
+      geom_line(
+        aes(
+          y = caudal_m3s,
+          color = escenario,
+          linetype = escenario
+        ),
+        linewidth = 0.75,
+        alpha = 0.9
+      ) +
+      # Caudal observado
+      geom_line(
+        aes(
+          y = Q_obs_m3s,
+          group = escenario
+        ),
+        color = "black",
+        linewidth = 0.85
+      ) +
+      facet_wrap(
+        ~ escenario,
+        ncol = 1,
+        scales = "fixed"
+      ) +
+      scale_color_manual(values = colores) +
+      scale_linetype_manual(values = tipos_linea) +
+      scale_x_date(
+        date_breaks = "1 year",
+        date_labels = "%Y"
+      ) +
+      guides(
+        color = "none",
+        linetype = "none"
+      ) +
+      labs(
+        title = "Caudal observado versus simulado",
+        subtitle = paste(
+          "Período", anio_inicio_zoom, "–",
+          anio_fin_zoom,
+          "| Negro: CAMELS-CL | Color: SWAT+"
+        ),
+        x = "Año",
+        y = "Caudal medio mensual (m³/s)"
+      ) +
+      tema
+
+  } else {
+    cat(
+      "No hay meses coincidentes en el período ",
+      "seleccionado. Cambia anio_inicio_zoom ",
+      "y anio_fin_zoom."
+    )
+  }
+}
+
+```
+
+### Figura 4. Dispersión observado versus simulado
+
+La relación entre los caudales observados y simulados se representa mediante diagramas de dispersión para todos los meses con información coincidente. La línea diagonal indica una correspondencia perfecta entre ambas series, mientras que la distancia de los puntos respecto de ella refleja las diferencias de simulación. Este gráfico permite examinar visualmente la dispersión, el sesgo y el comportamiento del modelo frente a caudales de distinta magnitud.
+
+```{r}
+
+#| fig-width: 10
+#| fig-height: 4.5
+#| fig-cap: "Relación entre caudal observado y simulado para todos los meses coincidentes."
+
+if (nrow(comparacion) > 0) {
+
+  ggplot(
+    comparacion,
+    aes(
+      x = Q_obs_m3s,
+      y = caudal_m3s,
+      color = escenario
+    )
+  ) +
+    geom_abline(
+      intercept = 0,
+      slope = 1,
+      color = "black",
+      linetype = "dashed",
+      linewidth = 0.8
+    ) +
+    geom_point(
+      alpha = 0.45,
+      size = 1.4
+    ) +
+    facet_wrap(
+      ~ escenario,
+      ncol = 3
+    ) +
+    coord_equal() +
+    scale_color_manual(values = colores) +
+    guides(color = "none") +
+    labs(
+      title = "Correspondencia entre caudales observados y simulados",
+      subtitle = paste(
+        "La línea diagonal representa",
+        "una coincidencia perfecta (1:1)"
+      ),
+      x = "Caudal observado CAMELS-CL (m³/s)",
+      y = "Caudal simulado SWAT+ (m³/s)"
+    ) +
+    tema
+}
+
+
+```
+
+### 5.1. Evaluación del desempeño
+
+Se utilizan tres métricas:
+
+-   RMSE: error cuadrático medio, en m³/s.
+-   NSE: eficiencia de Nash-Sutcliffe, adimensional.
+-   PBIAS: sesgo porcentual, positivo cuando se sobreestima el caudal.
+
+Estas métricas constituyen una evaluación preliminar del modelo sin calibrar, no una validación definitiva.
+
+```{r}
+desempeno <- tibble::tibble()
+
+evaluar_modelo <- function(x) {
+
+  obs <- x$Q_obs_m3s
+  sim <- x$caudal_m3s
+
+  rmse <- sqrt(mean((sim - obs)^2))
+
+  denominador <- sum(
+    (obs - mean(obs))^2
+  )
+
+  nse <- if (denominador > 0) {
+    1 - sum((sim - obs)^2) / denominador
+  } else {
+    NA_real_
+  }
+
+  pbias <- if (sum(obs) > 0) {
+    100 * sum(sim - obs) / sum(obs)
+  } else {
+    NA_real_
+  }
+
+  tibble(
+    meses = length(obs),
+    RMSE = rmse,
+    NSE = nse,
+    PBIAS = pbias
+  )
+}
+
+if (nrow(comparacion) >= 2) {
+
+  desempeno <- comparacion %>%
+    group_by(escenario) %>%
+    group_modify(
+      ~ evaluar_modelo(.x)
+    ) %>%
+    ungroup()
+
+  knitr::kable(
+    desempeno,
+    digits = 3,
+    caption = "Desempeño hidrológico preliminar"
+  )
+}
+```
+
+### Figura 5. Sesgo estacional respecto de CAMELS-CL
+
+Se examina el error mensual de las simulaciones, calculado como la diferencia entre el caudal simulado y el observado. Los valores positivos indican sobreestimación y los negativos, subestimación. La representación de la mediana del error para cada mes permite identificar posibles sesgos estacionales y evaluar si el desempeño del modelo varía a lo largo del año.
+
+```{r}
+
+#| fig-width: 10
+#| fig-height: 4.5
+#| fig-cap: "Mediana del error mensual de caudal para cada cobertura del suelo."
+
+if (nrow(comparacion) > 0) {
+
+  errores_estacionales <- comparacion %>%
+    mutate(
+      mes = lubridate::month(fecha),
+      error_m3s = caudal_m3s - Q_obs_m3s
+    ) %>%
+    group_by(escenario, mes) %>%
+    summarise(
+      error_mediano = median(
+        error_m3s,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    )
+
+  ggplot(
+    errores_estacionales,
+    aes(
+      x = mes,
+      y = error_mediano,
+      color = escenario
+    )
+  ) +
+    geom_hline(
+      yintercept = 0,
+      color = "gray30",
+      linetype = "dashed"
+    ) +
+    geom_line(linewidth = 0.9) +
+    geom_point(size = 2) +
+    facet_wrap(
+      ~ escenario,
+      ncol = 3
+    ) +
+    scale_color_manual(values = colores) +
+    scale_x_continuous(
+      breaks = 1:12,
+      labels = meses_esp
+    ) +
+    guides(color = "none") +
+    labs(
+      title = "Sesgo estacional de las simulaciones",
+      subtitle = "Error = caudal simulado − caudal observado",
+      x = "Mes",
+      y = "Error mediano mensual (m³/s)"
+    ) +
+    tema +
+    theme(
+      axis.text.x = element_text(
+        angle = 45,
+        hjust = 1
+      )
+    )
+}
+
+```
+
+## 6. Nitratos observados: referencia regional
+
+La estación Río Pucón en Balseadero Quelhue presenta mediciones históricas de nitrato.
+
+Esta estación recibe aportes de un área mayor a la del Liucura. Sus datos se utilizan para caracterizar las concentraciones regionales y no para validar directamente `no3_out`.
+
+Además, las unidades analíticas deben confirmarse antes de compararlas con las concentraciones equivalentes de SWAT+.
+
+```{r}
+ruta_nitratos <- "datos/observados/nitrogeno_quelhue.csv"
+
+nitratos_obs <- leer_csv_seguro(ruta_nitratos)
+
+if (nrow(nitratos_obs) > 0) {
+
+  nitratos_obs <- nitratos_obs %>%
+    mutate(
+      fecha = as.Date(fecha),
+      valor = as.numeric(valor),
+      calidad = coalesce(
+        as.character(calidad),
+        ""
+      )
+    ) %>%
+    filter(
+      parametro == "Nitrato",
+      !is.na(fecha),
+      is.finite(valor)
+    )
+
+  # Valores cuantificados o sin marca explícita.
+  # Los resultados con "<" y "?" se excluyen
+  # de este gráfico, pero se conservan en el CSV.
+
+  nitratos_grafico <- nitratos_obs %>%
+    filter(
+      calidad %in% c("=", "")
+    )
+
+  cat(
+    "Registros de nitrato:",
+    nrow(nitratos_obs),
+    "\nRegistros mostrados:",
+    nrow(nitratos_grafico),
+    "\n"
+  )
+
+  ggplot(
+    nitratos_grafico,
+    aes(fecha, valor)
+  ) +
+    geom_point(
+      color = "#38876A",
+      size = 2,
+      alpha = 0.75
+    ) +
+    labs(
+      title = "Nitratos observados en el río Pucón",
+      subtitle = "Estación Balseadero Quelhue (DGA)",
+      x = "Año",
+      y = "Valor reportado (unidad por confirmar)",
+      caption = paste(
+        "Referencia regional.",
+        "No corresponde a la salida del Liucura.",
+        "Se excluyen valores bajo límite y dudosos."
+      )
+    ) +
+    tema
+}
+```
+
+## 7. Sedimentos observados: río Trancura
+
+Se caracteriza la variabilidad estacional de las concentraciones de sedimentos registradas en la estación Río Trancura antes Río Llafenco, diferenciando los métodos de muestreo rutinario e integrado. Para cada mes se representa la mediana y el rango intercuartílico, facilitando la identificación de patrones estacionales y la dispersión de las observaciones.
+
+Dado que esta estación se encuentra fuera del área aportante modelada, sus registros se consideran una referencia regional y no una validación directa de los sedimentos simulados.
+
+```{r}
+
+#| fig-width: 9
+#| fig-height: 7
+#| fig-cap: "Concentraciones estacionales de sedimentos en el río Trancura según tipo de muestreo."
+
+# 1. Cargar datos observados
+rut <- leer_csv_seguro(
+  "datos/observados/sedimentos_trancura_rutinario.csv"
+)
+
+integ <- leer_csv_seguro(
+  "datos/observados/sedimentos_trancura_integrado.csv"
+)
+
+sedimentos_obs <- dplyr::bind_rows(rut, integ)
+
+if (nrow(sedimentos_obs) > 0) {
+
+  # 2. Preparar datos
+  sedimentos_obs <- sedimentos_obs %>%
+    mutate(
+      fecha = as.Date(fecha),
+      concentracion_mg_L = as.numeric(
+        concentracion_mg_L
+      ),
+      mes = factor(
+        lubridate::month(fecha),
+        levels = 1:12,
+        labels = meses_esp
+      )
+    ) %>%
+    filter(
+      !is.na(fecha),
+      is.finite(concentracion_mg_L),
+      concentracion_mg_L >= 0
+    )
+
+  # 3. Resumen por tipo de muestreo y mes
+  sedimentos_estacional <- sedimentos_obs %>%
+    group_by(tipo, mes) %>%
+    summarise(
+      n = n(),
+      mediana = median(concentracion_mg_L),
+      p25 = quantile(concentracion_mg_L, 0.25),
+      p75 = quantile(concentracion_mg_L, 0.75),
+      .groups = "drop"
+    )
+
+  # 4. Tabla de control
+  resumen_sedimentos <- sedimentos_obs %>%
+    group_by(tipo) %>%
+    summarise(
+      registros = n(),
+      porcentaje_ceros = round(
+        100 * mean(concentracion_mg_L == 0),
+        1
+      ),
+      .groups = "drop"
+    )
+
+  print(
+    knitr::kable(
+      resumen_sedimentos,
+      caption = "Disponibilidad de datos sedimentométricos"
+    )
+  )
+
+  # 5. Gráfico
+  print(
+    ggplot(
+      sedimentos_estacional,
+      aes(x = mes, y = mediana)
+    ) +
+      geom_linerange(
+        aes(
+          ymin = p25,
+          ymax = p75
+        ),
+        linewidth = 1.3,
+        color = "#6095A1"
+      ) +
+      geom_point(
+        size = 2.8,
+        color = "#16475A"
+      ) +
+      facet_wrap(
+        ~ tipo,
+        ncol = 1,
+        scales = "free_y"
+      ) +
+      scale_y_continuous(
+        trans = scales::pseudo_log_trans(sigma = 1)
+      ) +
+      labs(
+        title = "Estacionalidad de los sedimentos observados",
+        subtitle = paste(
+          "Punto: mediana | Barra vertical:",
+          "percentiles 25–75"
+        ),
+        x = "Mes",
+        y = "Concentración (mg/L)",
+        caption = paste(
+          "Fuente: DGA, río Trancura antes Llafenco.",
+          "Escala vertical pseudo-logarítmica.",
+          "Las muestras son irregulares y no representan",
+          "las cargas mensuales del Liucura."
+        )
+      ) +
+      tema
+  )
+}
+
+```
+
+Las observaciones sedimentométricas tienen una frecuencia irregular. Por lo tanto, las distribuciones de cada mes representan únicamente los días efectivamente muestreados, no una estimación completa de la carga mensual.
+
+## 8. Producción de sedimentos por erosión hídrica en la cuenca
+
+Además del transporte fluvial, se evalúan las pérdidas desde el paisaje a escala de cuenca utilizando `basin_ls_mon.csv`.
+
+Este archivo no representa las cargas medidas en el canal de salida, pero permite identificar cómo cambia la generación y exportación de sedimentos desde el paisaje.
+
+### Figura 6. Producción anual de sedimentos
+
+Se analiza la producción anual de sedimentos generados por erosión hídrica en las superficies terrestres de la cuenca, utilizando la variable `sedyld` de SWAT+. A diferencia de los sedimentos transportados por el canal de salida, esta variable representa el aporte generado desde las unidades terrestres del modelo. La comparación interanual permite examinar cómo responde este proceso a las distintas representaciones de cobertura del suelo.
+
+```{r}
+
+
+#| fig-width: 9
+#| fig-height: 7
+#| fig-cap: "Evolución anual de la producción de sedimentos por erosión hídrica en la cuenca del Liucura."
+
+paisaje_anual <- tibble::tibble()
+
+if (nrow(paisaje) > 0) {
+
+  # 1. Agregación anual
+  paisaje_anual <- paisaje %>%
+    mutate(
+      anio = lubridate::year(fecha),
+      mes = lubridate::month(fecha)
+    ) %>%
+    group_by(escenario, anio) %>%
+    filter(
+      n() == 12,
+      n_distinct(mes) == 12,
+      all(is.finite(sedyld_t_ha))
+    ) %>%
+    summarise(
+      sedimentos_t_ha_anio = sum(sedyld_t_ha),
+      .groups = "drop"
+    )
+
+  # 2. Comparación temporal
+  print(
+    ggplot(
+      paisaje_anual,
+      aes(
+        x = anio,
+        y = sedimentos_t_ha_anio,
+        color = escenario,
+        linetype = escenario
+      )
+    ) +
+      geom_line(linewidth = 0.85) +
+      geom_point(size = 1.3) +
+      facet_wrap(
+        ~ escenario,
+        ncol = 1,
+        scales = "fixed"
+      ) +
+      scale_color_manual(values = colores) +
+      scale_linetype_manual(values = tipos_linea) +
+      guides(
+        color = "none",
+        linetype = "none"
+      ) +
+      labs(
+        title = "Producción anual de sedimentos en la cuenca",
+        subtitle = paste(
+          "Erosión hídrica simulada",
+          "para las tres coberturas del suelo"
+        ),
+        x = "Año",
+        y = "Producción de sedimentos (t/ha/año)"
+      ) +
+      tema
+  )
+}
+
+```
+
+### Figura 7. Distribución de la producción anual de sedimentos
+
+Se compara la distribución de la producción anual de sedimentos entre las tres simulaciones, utilizando diagramas de caja y puntos que representan los años individuales. Esta visualización permite evaluar diferencias en la tendencia central, la dispersión y los valores extremos, complementando el análisis temporal anterior. Su propósito es determinar si los cambios de cobertura generan respuestas sistemáticamente distintas en la producción de sedimentos.
+
+```{r}
+
+#| fig-width: 8
+#| fig-height: 5
+#| fig-cap: "Distribución interanual de la producción de sedimentos para las tres coberturas del suelo."
+
+if (nrow(paisaje_anual) > 0) {
+
+  # Resumen estadístico
+  resumen_produccion <- paisaje_anual %>%
+    group_by(escenario) %>%
+    summarise(
+      anios = n(),
+      promedio = mean(sedimentos_t_ha_anio),
+      mediana = median(sedimentos_t_ha_anio),
+      minimo = min(sedimentos_t_ha_anio),
+      maximo = max(sedimentos_t_ha_anio),
+      .groups = "drop"
+    )
+
+  print(
+    knitr::kable(
+      resumen_produccion,
+      digits = 2,
+      caption = paste(
+        "Resumen de producción anual de sedimentos",
+        "(t/ha/año)"
+      )
+    )
+  )
+
+  print(
+    ggplot(
+      paisaje_anual,
+      aes(
+        x = escenario,
+        y = sedimentos_t_ha_anio,
+        fill = escenario
+      )
+    ) +
+      geom_boxplot(
+        width = 0.5,
+        alpha = 0.65,
+        outlier.shape = NA
+      ) +
+      geom_jitter(
+        width = 0.12,
+        size = 1.3,
+        alpha = 0.4
+      ) +
+      scale_fill_manual(values = colores) +
+      guides(fill = "none") +
+      labs(
+        title = "Distribución de la producción anual de sedimentos",
+        subtitle = paste(
+          "Cada punto representa un año de simulación;",
+          "las cajas resumen su variabilidad"
+        ),
+        x = "Cobertura del suelo",
+        y = "Producción de sedimentos (t/ha/año)"
+      ) +
+      tema
+  )
+}
+
+```
+
+## 9. Discusión
+
+La comparación de los tres productos permite evaluar cuánto varía la respuesta simulada según la representación de la cobertura del suelo, manteniendo constantes los demás insumos y parámetros del modelo.
+
+Para interpretar los resultados, se consideran cuatro aspectos:
+
+1.  Magnitud de las diferencias mensuales y anuales entre coberturas.
+2.  Diferencias estacionales en caudal, sedimentos y nitratos.
+3.  Correspondencia entre los caudales simulados y observados.
+4.  Limitaciones de los datos y su representatividad espacial y temporal.
+
+La elección de la cobertura del suelo para la tesis no se realizará exclusivamente según el menor error de caudal, sino también según su representación ecológica del territorio y las diferencias en la respuesta sedimentológica y de nutrientes.
+
+## 10. Exportación de resultados
+
+```{r}
+dir.create(
+  "resultados",
+  showWarnings = FALSE
+)
+
+if (nrow(outlet) > 0) {
+  write_csv(
+    outlet,
+    "resultados/series_swat_outlet.csv"
+  )
+}
+
+if (nrow(anual) > 0) {
+  write_csv(
+    anual,
+    "resultados/comparacion_anual.csv"
+  )
+}
+
+if (nrow(desempeno) > 0) {
+  write_csv(
+    desempeno,
+    "resultados/desempeno_caudal.csv"
+  )
+}
+
+if (nrow(paisaje) > 0) {
+  write_csv(
+    paisaje,
+    "resultados/perdidas_paisaje.csv"
+  )
+}
+```
+
+## Referencias
+
+-   Dirección General de Aguas. Banco Nacional de Aguas, reportes históricos de calidad de agua y sedimentos, Región de La Araucanía.
+-   CAMELS-CL. Registros de caudal observado de la estación Río Liucura en Liucura, código 9416001.
+-   SWAT+ Documentation. [Channel, sediment and nutrient outputs](https://docs.swat.tamu.edu/62.0.1/output-reference/channel-sediment-nutrient/).
